@@ -1,0 +1,312 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from snowflake.snowpark.context import get_active_session
+
+# ---------------------------------------------------------
+# 1. Get active Snowflake Session
+# ---------------------------------------------------------
+session = get_active_session()
+
+# ---------------------------------------------------------
+# 2. Page configuration
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="IBRD Loan Analytics Dashboard",
+    layout="wide"
+)
+
+# ---------------------------------------------------------
+# 3. Load FACT_LOAN instead of FACT_LOAN
+# ---------------------------------------------------------
+fact_df = session.sql("""
+    SELECT *
+    FROM IBRD_PROJECT.IBRD_GOLD.FACT_LOAN_DEDUPED
+    LIMIT 134276
+""").to_pandas()
+
+# ---------------------------------------------------------
+# 4. Clean & compute standard time fields
+# ---------------------------------------------------------
+fact_df["END_OF_PERIOD"] = pd.to_datetime(fact_df["END_OF_PERIOD"])
+fact_df["YEAR"] = fact_df["END_OF_PERIOD"].dt.year
+fact_df["MONTH"] = fact_df["END_OF_PERIOD"].dt.month
+
+# ---------------------------------------------------------
+# 5. Compute Repayment Period if missing
+# ---------------------------------------------------------
+if "REPAYMENT_PERIOD_DAYS" not in fact_df.columns:
+    fact_df["REPAYMENT_PERIOD_DAYS"] = (
+        pd.to_datetime(fact_df["LAST_REPAYMENT_DATE"])
+        - pd.to_datetime(fact_df["FIRST_REPAYMENT_DATE"])
+    ).dt.days
+
+# ---------------------------------------------------------
+# 6. Compute Sudden Drop % (MoM) Since deduped table doesn't have it
+# ---------------------------------------------------------
+df_sorted = fact_df.sort_values(["COUNTRY_ECONOMY", "END_OF_PERIOD"])
+
+df_sorted["PREV_DISBURSED"] = (
+    df_sorted
+    .groupby("COUNTRY_ECONOMY")["DISBURSED_AMOUNT_USD"]
+    .shift(1)
+)
+
+df_sorted["DISBURSEMENT_CHANGE_PERCENTAGE"] = (
+    (df_sorted["DISBURSED_AMOUNT_USD"] - df_sorted["PREV_DISBURSED"])
+    / df_sorted["PREV_DISBURSED"]
+)
+
+# Attach corrected df back
+fact_df = df_sorted
+
+# ---------------------------------------------------------
+# 7. Dashboard title
+# ---------------------------------------------------------
+st.title("📊 IBRD Loan Management Analytics Dashboard")
+
+# ---------------------------------------------------------
+# 8. Sidebar filter — Country selection
+# ---------------------------------------------------------
+country_list = sorted(fact_df["COUNTRY_ECONOMY"].dropna().unique())
+
+country_filter = st.sidebar.selectbox(
+    "Select Country",
+    ["All"] + list(country_list)
+)
+
+df = fact_df if country_filter == "All" else fact_df[fact_df["COUNTRY_ECONOMY"] == country_filter]
+
+# ---------------------------------------------------------
+# 9. KPI Cards
+# ---------------------------------------------------------
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Total Loans", len(df))
+col2.metric("Total Disbursed (USD)", f"{df['DISBURSED_AMOUNT_USD'].sum():,.0f}")
+col3.metric("Total Cancelled (USD)", f"{df['CANCELLED_AMOUNT_USD'].sum():,.0f}")
+col4.metric("Avg Repayment Days", round(df["REPAYMENT_PERIOD_DAYS"].mean(), 2))
+
+# ---------------------------------------------------------
+# 10. Yearly Disbursement Trend
+# ---------------------------------------------------------
+st.subheader("📈 Yearly Disbursement Trend")
+
+trend = df.groupby("YEAR")["DISBURSED_AMOUNT_USD"].sum().reset_index()
+fig1 = px.line(trend, x="YEAR", y="DISBURSED_AMOUNT_USD", markers=True)
+st.plotly_chart(fig1, use_container_width=True)
+
+# ---------------------------------------------------------
+# 11. Top 3 Loan Recipient Countries
+# ---------------------------------------------------------
+st.subheader("🏆 Top 3 Loan Recipient Countries")
+
+top3 = (
+    fact_df.groupby("COUNTRY_ECONOMY")["DISBURSED_AMOUNT_USD"]
+    .sum()
+    .nlargest(3)
+    .reset_index()
+)
+
+fig2 = px.bar(top3, x="COUNTRY_ECONOMY", y="DISBURSED_AMOUNT_USD")
+st.plotly_chart(fig2, use_container_width=True)
+
+# 12. Sudden Drop Detection (>30%)
+# ---------------------------------------------------------
+st.subheader("📉 Sudden Drops in Disbursement (>30%)")
+
+drop_df = df[df["DISBURSEMENT_CHANGE_PERCENTAGE"] < -0.30]
+
+st.dataframe(
+    drop_df[[
+        "COUNTRY_ECONOMY",
+        "END_OF_PERIOD",
+        "DISBURSEMENT_CHANGE_PERCENTAGE",
+        "DISBURSED_AMOUNT_USD",
+        "PREV_DISBURSED"
+    ]],
+    use_container_width=True
+)
+
+
+# ---------------------------------------------------------
+# 13. Average Repayment Period by Country
+# ---------------------------------------------------------
+st.subheader("⏳ Average Repayment Period by Country")
+
+repay = (
+    fact_df.groupby("COUNTRY_ECONOMY")["REPAYMENT_PERIOD_DAYS"]
+    .mean()
+    .reset_index()
+)
+
+fig3 = px.bar(repay, x="COUNTRY_ECONOMY", y="REPAYMENT_PERIOD_DAYS")
+st.plotly_chart(fig3, use_container_width=True)
+
+# ---------------------------------------------------------
+# 14. Loan Status Distribution
+# ---------------------------------------------------------
+st.subheader("🟢 Loan Status Distribution")
+
+status_df = (
+    df.groupby("LOAN_STATUS")
+    .size()
+    .reset_index(name="COUNT")
+)
+
+fig4 = px.pie(status_df, names="LOAN_STATUS", values="COUNT")
+st.plotly_chart(fig4, use_container_width=True)
+
+st.subheader("🌍 Loan Portfolio by Region")
+region_df = df.groupby("REGION")["LOAN_NUMBER"].count().reset_index()
+fig = px.bar(region_df, x="REGION", y="LOAN_NUMBER")
+st.plotly_chart(fig, use_container_width=True)
+
+st.subheader("🏦 Loan Type Distribution")
+fig = px.pie(df, names="LOAN_TYPE")
+st.plotly_chart(fig, use_container_width=True)
+
+
+
+st.subheader("🔍 Country Drilldown")
+
+country = st.selectbox("Pick a Country", sorted(df["COUNTRY_ECONOMY"].unique()))
+
+cd = df[df["COUNTRY_ECONOMY"] == country]
+
+fig = px.line(cd, x="END_OF_PERIOD", y="DISBURSED_AMOUNT_USD",
+              title=f"Disbursement Trend - {country}")
+st.plotly_chart(fig, use_container_width=True)
+
+st.subheader("❌ Loan Cancellations by Country")
+
+cancel_df = df.groupby("COUNTRY_ECONOMY")["CANCELLED_AMOUNT_USD"].sum().reset_index()
+fig = px.bar(cancel_df.sort_values("CANCELLED_AMOUNT_USD", ascending=False),
+             x="COUNTRY_ECONOMY", y="CANCELLED_AMOUNT_USD")
+st.plotly_chart(fig, use_container_width=True)
+
+
+
+# ---------------------------------------------------------
+# ADD CALCULATED COLUMNS (because deduped table does not have them)
+# ---------------------------------------------------------
+
+# Convert to datetime
+fact_df["AGREEMENT_SIGNING_DATE"] = pd.to_datetime(fact_df["AGREEMENT_SIGNING_DATE"])
+fact_df["FIRST_REPAYMENT_DATE"] = pd.to_datetime(fact_df["FIRST_REPAYMENT_DATE"])
+fact_df["LAST_REPAYMENT_DATE"] = pd.to_datetime(fact_df["LAST_REPAYMENT_DATE"])
+fact_df["END_OF_PERIOD"] = pd.to_datetime(fact_df["END_OF_PERIOD"])
+
+# Derived metrics
+fact_df["DAYS_TO_FIRST_REPAYMENT"] = (
+    fact_df["FIRST_REPAYMENT_DATE"] - fact_df["AGREEMENT_SIGNING_DATE"]
+).dt.days
+
+fact_df["DAYS_TO_LAST_REPAYMENT"] = (
+    fact_df["LAST_REPAYMENT_DATE"] - fact_df["AGREEMENT_SIGNING_DATE"]
+).dt.days
+
+fact_df["REPAYMENT_PERIOD_DAYS"] = (
+    fact_df["LAST_REPAYMENT_DATE"] - fact_df["FIRST_REPAYMENT_DATE"]
+).dt.days
+
+# Sudden drop logic
+fact_df = fact_df.sort_values(["COUNTRY_ECONOMY_CODE", "END_OF_PERIOD"])
+
+fact_df["DISBURSEMENT_LAG"] = fact_df.groupby(
+    "COUNTRY_ECONOMY_CODE"
+)["DISBURSED_AMOUNT_USD"].shift(1)
+
+fact_df["DISBURSEMENT_CHANGE_PERCENTAGE"] = (
+    (fact_df["DISBURSED_AMOUNT_USD"] - fact_df["DISBURSEMENT_LAG"])
+    / fact_df["DISBURSEMENT_LAG"]
+)
+
+# Handle divide-by-zero or NaN
+fact_df["DISBURSEMENT_CHANGE_PERCENTAGE"] = (
+    fact_df["DISBURSEMENT_CHANGE_PERCENTAGE"]
+    .replace([float("inf"), float("-inf")], None)
+)
+
+# ---------------------------------------------------------
+# 📌 LOAN PROCESSING TIME DASHBOARD
+# ---------------------------------------------------------
+
+st.header("⏱ Loan Processing Time Analysis")
+
+processing_tab1, processing_tab3 = st.tabs(
+    ["Overview", "Trends Over Time"]
+)
+
+# ---------------------------------------------------------
+# TAB 1: OVERVIEW
+# ---------------------------------------------------------
+with processing_tab1:
+
+    st.subheader("🔍 Overview of Loan Processing Durations")
+
+    col1, col2, col3 = st.columns(3)
+
+    
+    col1.metric("Avg Days to First Repayment", f"{abs(df['DAYS_TO_FIRST_REPAYMENT'].mean()):.1f}")
+
+    col2.metric(
+        "Avg Days to Last Repayment",
+        f"{abs(df['DAYS_TO_LAST_REPAYMENT'].mean()):.1f}"
+    )
+    col3.metric(
+        "Avg Repayment Period (Days)",
+        f"{abs(df['REPAYMENT_PERIOD_DAYS'].mean()):.1f}"
+    )
+
+    # Histograms (Processing Distribution)
+    st.subheader("⏳ Distribution of Processing Times")
+
+    col_a, col_b = st.columns(2)
+
+    fig_a = px.histogram(df, x="DAYS_TO_FIRST_REPAYMENT", nbins=40,
+                         title="Days to First Repayment Distribution")
+    col_a.plotly_chart(fig_a, use_container_width=True)
+
+    fig_b = px.histogram(df, x="DAYS_TO_LAST_REPAYMENT", nbins=40,
+                         title="Days to Last Repayment Distribution")
+    col_b.plotly_chart(fig_b, use_container_width=True)
+
+    # Outliers
+    st.subheader("🚨 Loans With Unusually Long Processing Periods")
+
+    outliers = df[df["DAYS_TO_FIRST_REPAYMENT"] > df["DAYS_TO_FIRST_REPAYMENT"].mean() * 3]
+
+    st.dataframe(
+        outliers[[
+            "LOAN_NUMBER",
+            "COUNTRY_ECONOMY",
+            "AGREEMENT_SIGNING_DATE",
+            "FIRST_REPAYMENT_DATE",
+            "DAYS_TO_FIRST_REPAYMENT"
+        ]],
+        use_container_width=True
+    )
+
+
+# ---------------------------------------------------------
+# TAB 3: TIME TRENDS
+# ---------------------------------------------------------
+with processing_tab3:
+
+    st.subheader("📅 Processing Time Trends Over the Years")
+    df["DAYS_TO_FIRST_REPAYMENT"] = df["DAYS_TO_FIRST_REPAYMENT"].abs()
+
+    trend = df.groupby("YEAR")[
+        "DAYS_TO_FIRST_REPAYMENT"
+    ].mean().reset_index()
+
+    fig_trend = px.line(
+        trend,
+        x="YEAR",
+        y="DAYS_TO_FIRST_REPAYMENT",
+        markers=True,
+        title="Avg Processing Time Over Years"
+    )
+
+    st.plotly_chart(fig_trend, use_container_width=True)
