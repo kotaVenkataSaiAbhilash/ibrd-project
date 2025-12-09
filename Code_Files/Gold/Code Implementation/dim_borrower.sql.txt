@@ -1,0 +1,17 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH src AS (
+    SELECT DISTINCT
+        BORROWER AS borrower_name
+    FROM {{ ref('silver_master') }}
+    WHERE borrower_name IS NOT NULL
+)
+
+SELECT
+    {{ generate_surrogate_key(['borrower_name']) }} AS borrower_key,
+    borrower_name,
+    'BORROWER' as Borrower_Role
+FROM src

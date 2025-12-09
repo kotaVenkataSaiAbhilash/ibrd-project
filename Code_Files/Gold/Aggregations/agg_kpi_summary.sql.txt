@@ -1,0 +1,45 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH fact AS (
+    SELECT *
+    FROM {{ ref('fact_loan') }}
+),
+
+country AS (
+    SELECT
+        country_key,
+        COUNTRY_ECONOMY_CODE,
+        COUNTRY_ECONOMY AS country_name,
+        REGION,
+
+        -- Summaries
+        SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) AS total_principal,
+        SUM(DISBURSED_AMOUNT_USD) AS total_disbursed,
+        SUM(REPAID_TO_IBRD_USD) AS total_repaid,
+        SUM(DUE_TO_IBRD_USD) AS total_due,
+        SUM(CANCELLED_AMOUNT_USD) AS total_cancelled,
+
+        -- Performance Metrics
+        AVG(repayment_period_days) AS avg_repayment_period,
+        AVG(days_to_first_repayment) AS avg_days_to_first_repayment,
+        AVG(days_to_last_repayment) AS avg_days_to_last_repayment,
+
+        COUNT(*) AS total_loans,
+        SUM(loan_cancelled_flag) AS loans_cancelled,
+
+        MIN(disbursement_change_percentage) AS worst_disbursement_drop_pct,
+
+        -- Top Recipient Rank
+        DENSE_RANK() OVER (
+            ORDER BY SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) DESC
+        ) AS recipient_rank,
+
+        CASE WHEN SUM(CANCELLED_AMOUNT_USD) > 0 THEN 'YES' ELSE 'NO' END AS has_cancellation
+    FROM fact
+    GROUP BY country_key, COUNTRY_ECONOMY_CODE, COUNTRY_ECONOMY, REGION
+)
+
+SELECT * FROM country

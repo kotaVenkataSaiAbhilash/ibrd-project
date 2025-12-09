@@ -1,0 +1,37 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH fact AS (
+    SELECT *
+    FROM {{ ref('fact_loan') }}
+),
+
+agg AS (
+    SELECT
+        project_key,
+        PROJECT_ID,
+        PROJECT_NAME,
+
+        country_key,
+        COUNTRY_ECONOMY_CODE,
+        COUNTRY_ECONOMY AS country_name,
+
+        SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) AS total_principal,
+        SUM(DISBURSED_AMOUNT_USD) AS total_disbursed,
+        SUM(CANCELLED_AMOUNT_USD) AS total_cancelled,
+        SUM(REPAID_TO_IBRD_USD) AS total_repaid,
+        SUM(DUE_TO_IBRD_USD) AS total_due,
+
+        AVG(repayment_period_days) AS avg_repayment_period,
+        COUNT(*) AS num_loans,
+
+        CASE WHEN SUM(CANCELLED_AMOUNT_USD) > 0 THEN 'YES' ELSE 'NO' END AS has_cancellation
+    FROM fact
+    GROUP BY
+        project_key, PROJECT_ID, PROJECT_NAME,
+        country_key, COUNTRY_ECONOMY_CODE, COUNTRY_ECONOMY
+)
+
+SELECT * FROM agg

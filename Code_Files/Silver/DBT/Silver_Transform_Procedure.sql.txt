@@ -1,0 +1,11 @@
+use database ibrd_project;
+CREATE OR REPLACE PROCEDURE dbt_run_stage_and_silver()
+RETURNS STRING
+LANGUAGE JAVASCRIPT
+AS
+
+$$
+  var cmd = `!dbt run --select stage_snowpark_loans silver_master`;
+  var res = snowflake.execute({sqlText: cmd});
+  return 'dbt run triggered';
+$$;

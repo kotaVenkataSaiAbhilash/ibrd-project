@@ -1,0 +1,20 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH src AS (
+    SELECT DISTINCT
+        PROJECT_ID,
+        PROJECT_NAME,
+        BORROWER
+    FROM {{ ref('silver_master') }}
+    WHERE PROJECT_ID IS NOT NULL
+)
+
+SELECT
+    ABS(HASH(PROJECT_ID)) AS project_key,
+    PROJECT_ID,
+    PROJECT_NAME,
+    ABS(HASH(BORROWER)) AS borrower_key
+FROM src

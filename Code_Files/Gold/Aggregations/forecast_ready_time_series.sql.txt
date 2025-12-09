@@ -1,0 +1,52 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH fact AS (
+    SELECT *,
+        DATE_TRUNC('month', END_OF_PERIOD) AS month_start
+    FROM {{ ref('fact_loan') }}
+),
+
+monthly AS (
+    SELECT
+        country_key,
+        COUNTRY_ECONOMY_CODE,
+        COUNTRY_ECONOMY AS country_name,
+        month_start,
+
+        SUM(DISBURSED_AMOUNT_USD) AS disbursed_amount
+    FROM fact
+    GROUP BY
+        country_key, COUNTRY_ECONOMY_CODE, COUNTRY_ECONOMY, month_start
+),
+
+lag_features AS (
+    SELECT
+        *,
+        LAG(disbursed_amount, 1) OVER (
+            PARTITION BY country_key ORDER BY month_start
+        ) AS disbursed_lag_1,
+
+        LAG(disbursed_amount, 2) OVER (
+            PARTITION BY country_key ORDER BY month_start
+        ) AS disbursed_lag_2,
+
+        LAG(disbursed_amount, 3) OVER (
+            PARTITION BY country_key ORDER BY month_start
+        ) AS disbursed_lag_3,
+
+        AVG(disbursed_amount) OVER (
+            PARTITION BY country_key ORDER BY month_start
+            ROWS BETWEEN 5 PRECEDING AND CURRENT ROW
+        ) AS moving_avg_6_months,
+
+        disbursed_amount -
+        LAG(disbursed_amount, 1) OVER (
+            PARTITION BY country_key ORDER BY month_start
+        ) AS month_over_month_change
+    FROM monthly
+)
+
+SELECT * FROM lag_features

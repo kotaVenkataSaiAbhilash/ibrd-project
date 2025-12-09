@@ -1,0 +1,166 @@
+CREATE OR REPLACE PROCEDURE IBRD_PROJECT.IBRD_GOLD.PROC_PROCESS_SILVER_TO_GOLD()
+RETURNS STRING
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS
+$$
+BEGIN
+
+    ----------------------------------------------------------------------------
+    -- 1) SCD2 MERGE for dim_loan (only tracking attributes used in your dim)
+    ----------------------------------------------------------------------------
+
+    MERGE INTO IBRD_PROJECT.IBRD_GOLD.DIM_LOAN AS tgt
+    USING (
+        SELECT
+            LOAN_NUMBER,
+            LOAN_TYPE,
+            LOAN_STATUS,
+            INTEREST_RATE,
+            CURRENCY_OF_COMMITMENT,
+            HASH(LOAN_NUMBER, LOAN_TYPE, LOAN_STATUS, INTEREST_RATE, CURRENCY_OF_COMMITMENT) AS record_hash
+        FROM IBRD_PROJECT.IBRD_SILVER.SILVER_MASTER_STREAM
+    ) AS src
+    ON tgt.LOAN_NUMBER = src.LOAN_NUMBER AND tgt.IS_CURRENT = TRUE
+    WHEN MATCHED AND tgt.RECORD_HASH <> src.record_hash THEN
+        UPDATE SET
+            IS_CURRENT = FALSE,
+            EFFECTIVE_END_DATE = CURRENT_DATE()
+    WHEN NOT MATCHED THEN
+        INSERT (LOAN_NUMBER, LOAN_TYPE, LOAN_STATUS, INTEREST_RATE, CURRENCY_OF_COMMITMENT,
+                EFFECTIVE_START_DATE, EFFECTIVE_END_DATE, IS_CURRENT, RECORD_HASH)
+        VALUES (src.LOAN_NUMBER, src.LOAN_TYPE, src.LOAN_STATUS, src.INTEREST_RATE, src.CURRENCY_OF_COMMITMENT,
+                CURRENT_DATE(), NULL, TRUE, src.record_hash);
+
+    ----------------------------------------------------------------------------
+    -- 2) Incremental MERGE/INSERT into FACT_LOAN using stream rows
+    ----------------------------------------------------------------------------
+
+    MERGE INTO IBRD_PROJECT.IBRD_GOLD.FACT_LOAN AS tgt
+    USING (
+        SELECT
+            ABS(HASH(LOAN_NUMBER || COALESCE(END_OF_PERIOD, ''))) AS fact_loan_key,
+            LOAN_NUMBER,
+            PROJECT_ID,
+            PROJECT_NAME,
+            REGION,
+            COUNTRY_ECONOMY_CODE,
+            COUNTRY_ECONOMY,
+            BORROWER,
+            GUARANTOR,
+            GUARANTOR_COUNTRY_ECONOMY_CODE,
+            LOAN_TYPE,
+            LOAN_STATUS,
+            CURRENCY_OF_COMMITMENT,
+            INTEREST_RATE,
+            TRY_TO_DATE(END_OF_PERIOD, 'YYYY-MM-DD') AS END_OF_PERIOD,
+            TRY_TO_DATE(AGREEMENT_SIGNING_DATE, 'YYYY-MM-DD') AS AGREEMENT_SIGNING_DATE,
+            TRY_TO_DATE(FIRST_REPAYMENT_DATE, 'YYYY-MM-DD') AS FIRST_REPAYMENT_DATE,
+            TRY_TO_DATE(LAST_REPAYMENT_DATE, 'YYYY-MM-DD') AS LAST_REPAYMENT_DATE,
+            TRY_TO_DATE(LAST_DISBURSEMENT_DATE, 'YYYY-MM-DD') AS LAST_DISBURSEMENT_DATE,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(ORIGINAL_PRINCIPAL_AMOUNT_USD, '[^0-9.-]', ''), 38, 10), 0) AS ORIGINAL_PRINCIPAL_AMOUNT_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(CANCELLED_AMOUNT_USD, '[^0-9.-]', ''), 38, 10), 0) AS CANCELLED_AMOUNT_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(UNDISBURSED_AMOUNT_USD, '[^0-9.-]', ''), 38, 10), 0) AS UNDISBURSED_AMOUNT_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(DISBURSED_AMOUNT_USD, '[^0-9.-]', ''), 38, 10), 0) AS DISBURSED_AMOUNT_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(REPAID_TO_IBRD_USD, '[^0-9.-]', ''), 38, 10), 0) AS REPAID_TO_IBRD_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(DUE_TO_IBRD_USD, '[^0-9.-]', ''), 38, 10), 0) AS DUE_TO_IBRD_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(EXCHANGE_ADJUSTMENT_USD, '[^0-9.-]', ''), 38, 10), 0) AS EXCHANGE_ADJUSTMENT_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(BORROWERS_OBLIGATION_USD, '[^0-9.-]', ''), 38, 10), 0) AS BORROWERS_OBLIGATION_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(SOLD_3RD_PARTY_USD, '[^0-9.-]', ''), 38, 10), 0) AS SOLD_3RD_PARTY_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(REPAID_3RD_PARTY_USD, '[^0-9.-]', ''), 38, 10), 0) AS REPAID_3RD_PARTY_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(DUE_3RD_PARTY_USD, '[^0-9.-]', ''), 38, 10), 0) AS DUE_3RD_PARTY_USD,
+            COALESCE(TO_NUMBER(REGEXP_REPLACE(LOANS_HELD_USD, '[^0-9.-]', ''), 38, 10), 0) AS LOANS_HELD_USD
+        FROM IBRD_PROJECT.IBRD_SILVER.SILVER_MASTER_STREAM
+    ) AS src
+    ON tgt.FACT_LOAN_KEY = src.fact_loan_key
+    WHEN MATCHED THEN
+        -- if the row exists, update measures (choose policy — here we update numeric measures to the latest)
+        UPDATE SET
+            tgt.ORIGINAL_PRINCIPAL_AMOUNT_USD = src.ORIGINAL_PRINCIPAL_AMOUNT_USD,
+            tgt.CANCELLED_AMOUNT_USD = src.CANCELLED_AMOUNT_USD,
+            tgt.UNDISBURSED_AMOUNT_USD = src.UNDISBURSED_AMOUNT_USD,
+            tgt.DISBURSED_AMOUNT_USD = src.DISBURSED_AMOUNT_USD,
+            tgt.REPAID_TO_IBRD_USD = src.REPAID_TO_IBRD_USD,
+            tgt.DUE_TO_IBRD_USD = src.DUE_TO_IBRD_USD,
+            tgt.EXCHANGE_ADJUSTMENT_USD = src.EXCHANGE_ADJUSTMENT_USD,
+            tgt.BORROWERS_OBLIGATION_USD = src.BORROWERS_OBLIGATION_USD,
+            tgt.SOLD_3RD_PARTY_USD = src.SOLD_3RD_PARTY_USD,
+            tgt.REPAID_3RD_PARTY_USD = src.REPAID_3RD_PARTY_USD,
+            tgt.DUE_3RD_PARTY_USD = src.DUE_3RD_PARTY_USD,
+            tgt.LOANS_HELD_USD = src.LOANS_HELD_USD,
+            tgt.END_OF_PERIOD = src.END_OF_PERIOD,
+            tgt.AGREEMENT_SIGNING_DATE = src.AGREEMENT_SIGNING_DATE,
+            tgt.FIRST_REPAYMENT_DATE = src.FIRST_REPAYMENT_DATE,
+            tgt.LAST_REPAYMENT_DATE = src.LAST_REPAYMENT_DATE,
+            tgt.LAST_DISBURSEMENT_DATE = src.LAST_DISBURSEMENT_DATE
+    WHEN NOT MATCHED THEN
+        INSERT (
+            FACT_LOAN_KEY,
+            END_OF_PERIOD,
+            LOAN_NUMBER,
+            PROJECT_ID,
+            PROJECT_NAME,
+            REGION,
+            COUNTRY_ECONOMY_CODE,
+            COUNTRY_ECONOMY,
+            BORROWER,
+            GUARANTOR,
+            GUARANTOR_COUNTRY_ECONOMY_CODE,
+            LOAN_TYPE,
+            LOAN_STATUS,
+            CURRENCY_OF_COMMITMENT,
+            INTEREST_RATE,
+            ORIGINAL_PRINCIPAL_AMOUNT_USD,
+            CANCELLED_AMOUNT_USD,
+            UNDISBURSED_AMOUNT_USD,
+            DISBURSED_AMOUNT_USD,
+            REPAID_TO_IBRD_USD,
+            DUE_TO_IBRD_USD,
+            EXCHANGE_ADJUSTMENT_USD,
+            BORROWERS_OBLIGATION_USD,
+            SOLD_3RD_PARTY_USD,
+            REPAID_3RD_PARTY_USD,
+            DUE_3RD_PARTY_USD,
+            LOANS_HELD_USD,
+            AGREEMENT_SIGNING_DATE,
+            FIRST_REPAYMENT_DATE,
+            LAST_REPAYMENT_DATE,
+            LAST_DISBURSEMENT_DATE
+        )
+        VALUES (
+            src.fact_loan_key,
+            src.END_OF_PERIOD,
+            src.LOAN_NUMBER,
+            src.PROJECT_ID,
+            src.PROJECT_NAME,
+            src.REGION,
+            src.COUNTRY_ECONOMY_CODE,
+            src.COUNTRY_ECONOMY,
+            src.BORROWER,
+            src.GUARANTOR,
+            src.GUARANTOR_COUNTRY_ECONOMY_CODE,
+            src.LOAN_TYPE,
+            src.LOAN_STATUS,
+            src.CURRENCY_OF_COMMITMENT,
+            src.INTEREST_RATE,
+            src.ORIGINAL_PRINCIPAL_AMOUNT_USD,
+            src.CANCELLED_AMOUNT_USD,
+            src.UNDISBURSED_AMOUNT_USD,
+            src.DISBURSED_AMOUNT_USD,
+            src.REPAID_TO_IBRD_USD,
+            src.DUE_TO_IBRD_USD,
+            src.EXCHANGE_ADJUSTMENT_USD,
+            src.BORROWERS_OBLIGATION_USD,
+            src.SOLD_3RD_PARTY_USD,
+            src.REPAID_3RD_PARTY_USD,
+            src.DUE_3RD_PARTY_USD,
+            src.LOANS_HELD_USD,
+            src.AGREEMENT_SIGNING_DATE,
+            src.FIRST_REPAYMENT_DATE,
+            src.LAST_REPAYMENT_DATE,
+            src.LAST_DISBURSEMENT_DATE
+        );
+
+    RETURN 'OK';
+END;
+$$;

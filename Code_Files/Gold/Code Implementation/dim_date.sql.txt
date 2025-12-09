@@ -1,0 +1,27 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH dates AS (
+    SELECT DISTINCT
+        TO_DATE(END_OF_PERIOD) AS date_value
+    FROM {{ ref('silver_master') }}
+    WHERE END_OF_PERIOD != '1900-01-01'
+)
+
+SELECT
+    ABS(HASH(date_value)) AS date_key,
+    date_value AS full_date,
+
+    YEAR(date_value) AS year,
+    QUARTER(date_value) AS quarter,
+    MONTH(date_value) AS month,
+    TO_CHAR(date_value, 'Month') AS month_name,
+    DAY(date_value) AS day_of_month,
+    TO_CHAR(date_value, 'Day') AS day_name,
+    WEEK(date_value) AS week_number,
+    YEAR(date_value)*100 + MONTH(date_value) AS year_month,
+    CASE WHEN DAYOFWEEK(date_value) IN (0, 6) THEN 1 ELSE 0 END AS is_weekend
+
+FROM dates

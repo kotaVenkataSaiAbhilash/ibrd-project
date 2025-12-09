@@ -1,0 +1,41 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH fact AS (
+    SELECT *,
+        YEAR(END_OF_PERIOD) AS year,
+        QUARTER(END_OF_PERIOD) AS quarter,
+        MONTH(END_OF_PERIOD) AS month
+    FROM {{ ref('fact_loan') }}
+),
+
+agg AS (
+    SELECT
+        country_key,
+        COUNTRY_ECONOMY_CODE,
+        COUNTRY_ECONOMY AS country_name,
+        REGION,
+
+        year,
+        quarter,
+        month,
+
+        SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) AS total_principal,
+        SUM(DISBURSED_AMOUNT_USD) AS total_disbursed,
+        SUM(REPAID_TO_IBRD_USD) AS total_repaid,
+        SUM(DUE_TO_IBRD_USD) AS total_due,
+        SUM(CANCELLED_AMOUNT_USD) AS total_cancelled,
+
+        AVG(repayment_period_days) AS avg_repayment_period,
+        AVG(days_to_first_repayment) AS avg_days_to_first_repayment,
+
+        COUNT(*) AS total_loans
+    FROM fact
+    GROUP BY
+        country_key, COUNTRY_ECONOMY_CODE, COUNTRY_ECONOMY, REGION,
+        year, quarter, month
+)
+
+SELECT * FROM agg

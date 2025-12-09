@@ -1,0 +1,95 @@
+-----------------------------------------------------
+-- 1. DATABASE & FILE FORMAT
+-----------------------------------------------------
+CREATE DATABASE IF NOT EXISTS ibrd_project;
+USE DATABASE ibrd_project;
+
+use schema ibrd;
+
+CREATE OR REPLACE FILE FORMAT parquet_ibrd
+    TYPE = 'PARQUET'
+    COMPRESSION = 'SNAPPY';
+
+-----------------------------------------------------
+-- 2. EXTERNAL STAGE (S3)
+-----------------------------------------------------
+CREATE OR REPLACE STAGE ibrd_stage
+  URL='s3://ibrd-comp/parquet/'
+  FILE_FORMAT = parquet_ibrd
+  CREDENTIALS = (
+      AWS_KEY_ID    = 'xxxxxxxxxxxxxxxxxxxxxx',
+      AWS_SECRET_KEY= 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+  );
+
+-- check files
+LIST @ibrd_stage;
+
+-----------------------------------------------------
+-- 3. RAW TABLE
+-----------------------------------------------------
+CREATE OR REPLACE TABLE IBRD_LOANS_RAW (
+    END_OF_PERIOD STRING,
+    LOAN_NUMBER STRING,
+    REGION STRING,
+    COUNTRY_ECONOMY_CODE STRING,
+    COUNTRY_ECONOMY STRING,
+    BORROWER STRING,
+    GUARANTOR_COUNTRY_ECONOMY_CODE STRING,
+    GUARANTOR STRING,
+    LOAN_TYPE STRING,
+    LOAN_STATUS STRING,
+    INTEREST_RATE STRING,
+    CURRENCY_OF_COMMITMENT STRING,
+    PROJECT_ID STRING,
+    PROJECT_NAME STRING,
+    ORIGINAL_PRINCIPAL_AMOUNT_USD STRING,
+    CANCELLED_AMOUNT_USD STRING,
+    UNDISBURSED_AMOUNT_USD STRING,
+    DISBURSED_AMOUNT_USD STRING,
+    REPAID_TO_IBRD_USD STRING,
+    DUE_TO_IBRD_USD STRING,
+    EXCHANGE_ADJUSTMENT_USD STRING,
+    BORROWERS_OBLIGATION_USD STRING,
+    SOLD_3RD_PARTY_USD STRING,
+    REPAID_3RD_PARTY_USD STRING,
+    DUE_3RD_PARTY_USD STRING,
+    LOANS_HELD_USD STRING,
+    FIRST_REPAYMENT_DATE STRING,
+    LAST_REPAYMENT_DATE STRING,
+    AGREEMENT_SIGNING_DATE STRING,
+    BOARD_APPROVAL_DATE STRING,
+    EFFECTIVE_DATE STRING,
+    CLOSED_DATE STRING,
+    LAST_DISBURSEMENT_DATE STRING
+);
+
+CREATE OR REPLACE TABLE IBRD_LOANS_LANDING AS
+SELECT * FROM IBRD_LOANS_RAW;
+
+-----------------------------------------------------
+-- 4.  CREATE SNOWPIPE WITH AUTO-INGEST
+-----------------------------------------------------
+-- Replace existing pipe to land files into the landing table
+CREATE OR REPLACE PIPE IBRD_PIPE
+  AUTO_INGEST = TRUE
+AS
+COPY INTO IBRD_PROJECT.IBRD.IBRD_LOANS_LANDING
+FROM @IBRD_PROJECT.IBRD.IBRD_STAGE
+FILE_FORMAT = (FORMAT_NAME = parquet_ibrd)
+MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+ON_ERROR = 'CONTINUE';
+
+-----------------------------------------------------
+-- 5. SHOW PIPE DETAILS (Trigger for S3)
+-----------------------------------------------------
+DESC PIPE ibrd_pipe;
+
+-- Output includes SQS AWS ARN. Example:
+-- notifications_channel: arn:aws:sqs:us-east-1:123456789012:snowpipe_ibrd_pipe
+
+-----------------------------------------------------
+-- 8. Validation
+-----------------------------------------------------
+SELECT COUNT(*) AS ROW_COUNT FROM IBRD_LOANS_RAW;
+SELECT COUNT(*) AS ROW_COUNT FROM IBRD_LOANS_LANDING;
+SELECT * FROM IBRD_LOANS_RAW LIMIT 20;

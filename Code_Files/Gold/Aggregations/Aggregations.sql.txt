@@ -1,0 +1,98 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH fact AS (
+    SELECT *
+    FROM {{ ref('fact_loan') }}
+),
+
+country_agg AS (
+    SELECT
+        country_key,
+        COUNTRY_ECONOMY_CODE,
+        COUNTRY_ECONOMY AS country_name,
+        REGION,
+
+        -----------------------------------------------------------------
+        -- AGGREGATED FINANCIAL METRICS
+        -----------------------------------------------------------------
+        SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) AS total_principal,
+        SUM(DISBURSED_AMOUNT_USD) AS total_disbursed,
+        SUM(CANCELLED_AMOUNT_USD) AS total_cancelled,
+        SUM(REPAID_TO_IBRD_USD) AS total_repaid,
+        SUM(DUE_TO_IBRD_USD) AS total_due,
+
+        -----------------------------------------------------------------
+        -- REPAYMENT / PROCESSING METRICS
+        -----------------------------------------------------------------
+        AVG(days_to_first_repayment) AS avg_days_to_first_repayment,
+        AVG(days_to_last_repayment) AS avg_days_to_last_repayment,
+        AVG(repayment_period_days) AS avg_repayment_period,
+
+        -----------------------------------------------------------------
+        -- LOAN STATUS METRICS
+        -----------------------------------------------------------------
+        COUNT(*) AS total_loans,
+        SUM(loan_cancelled_flag) AS cancelled_loans,
+
+        -----------------------------------------------------------------
+        -- SUDDEN DROP ANALYSIS SUPPORT
+        -----------------------------------------------------------------
+        AVG(disbursement_change_percentage) AS avg_disbursement_change_pct,
+        MIN(disbursement_change_percentage) AS worst_drop_pct,
+
+        -----------------------------------------------------------------
+        -- RECIPIENT RANK (Top 3 Loan Recipients)
+        -----------------------------------------------------------------
+        DENSE_RANK() OVER (
+            ORDER BY SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) DESC
+        ) AS loan_recipient_rank
+
+    FROM fact
+    GROUP BY
+        country_key,
+        COUNTRY_ECONOMY_CODE,
+        COUNTRY_ECONOMY,
+        REGION
+)
+
+SELECT
+    country_key,
+    COUNTRY_ECONOMY_CODE,
+    country_name,
+    REGION,
+
+    total_principal,
+    total_disbursed,
+    total_cancelled,
+    total_repaid,
+    total_due,
+
+    avg_days_to_first_repayment,
+    avg_days_to_last_repayment,
+    avg_repayment_period,
+
+    total_loans,
+    cancelled_loans,
+
+    avg_disbursement_change_pct,
+    worst_drop_pct,
+
+    loan_recipient_rank,
+
+    -----------------------------------------------------------------
+    -- INSIGHT FLAGS
+    -----------------------------------------------------------------
+
+    CASE WHEN cancelled_loans > 0 THEN 'YES' ELSE 'NO' END
+        AS has_cancellations,
+
+    CASE WHEN loan_recipient_rank <= 3 THEN 'TOP_3_RECIPIENT' ELSE 'OTHER' END
+        AS recipient_category,
+
+    CASE WHEN worst_drop_pct < -0.20 THEN 'SUDDEN_DROP' ELSE 'STABLE' END
+        AS disbursement_trend
+
+FROM country_agg

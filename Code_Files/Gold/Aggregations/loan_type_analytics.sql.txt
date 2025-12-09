@@ -1,0 +1,29 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH fact AS (
+    SELECT *
+    FROM {{ ref('fact_loan') }}
+),
+
+agg AS (
+    SELECT
+        LOAN_TYPE,
+
+        SUM(ORIGINAL_PRINCIPAL_AMOUNT_USD) AS total_principal,
+        SUM(DISBURSED_AMOUNT_USD) AS total_disbursed,
+        SUM(CANCELLED_AMOUNT_USD) AS total_cancelled,
+        SUM(REPAID_TO_IBRD_USD) AS total_repaid,
+        SUM(DUE_TO_IBRD_USD) AS total_due,
+
+        AVG(INTEREST_RATE) AS avg_interest_rate,
+        AVG(repayment_period_days) AS avg_repayment_period,
+
+        COUNT(*) AS loan_count
+    FROM fact
+    GROUP BY LOAN_TYPE
+)
+
+SELECT * FROM agg

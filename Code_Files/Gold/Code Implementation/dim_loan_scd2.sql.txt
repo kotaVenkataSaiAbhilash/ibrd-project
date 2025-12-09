@@ -1,0 +1,124 @@
+{{ config(
+    materialized='incremental',
+    unique_key='LOAN_STATUS',
+    on_schema_change='ignore'
+) }}
+
+-- ============================================================
+-- 1. Get latest snapshot per LOAN_NUMBER from silver_master
+-- ============================================================
+WITH latest AS (
+    SELECT
+        LOAN_NUMBER,
+        LOAN_TYPE,
+        LOAN_STATUS,
+        INTEREST_RATE,
+        CURRENCY_OF_COMMITMENT,
+        {{ generate_surrogate_key([
+            "LOAN_NUMBER",
+            "LOAN_TYPE",
+            "LOAN_STATUS",
+            "INTEREST_RATE",
+            "CURRENCY_OF_COMMITMENT"
+        ]) }} AS RECORD_HASH
+    FROM (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY LOAN_NUMBER
+                ORDER BY TO_DATE(END_OF_PERIOD) DESC
+            ) AS rn
+        FROM {{ ref('silver_master') }}
+    )
+    WHERE rn = 1
+)
+
+{% if not is_incremental() %}
+
+-- ============================================================
+-- FIRST FULL REFRESH
+-- ============================================================
+SELECT
+    {{ generate_surrogate_key(["LOAN_NUMBER", "CURRENT_TIMESTAMP"]) }} AS LOAN_SK,
+    LOAN_NUMBER,
+    LOAN_TYPE,
+    LOAN_STATUS,
+    INTEREST_RATE,
+    CURRENCY_OF_COMMITMENT,
+    CURRENT_DATE() AS EFFECTIVE_START_DATE,
+    NULL AS EFFECTIVE_END_DATE,
+    TRUE AS IS_CURRENT,
+    RECORD_HASH
+FROM latest
+
+{% else %}
+
+-- ============================================================
+-- 2. COMPARE WITH EXISTING DIM (ONLY CURRENT ROWS)
+-- ============================================================
+, compare AS (
+    SELECT
+        l.LOAN_NUMBER,
+        l.LOAN_TYPE,
+        l.LOAN_STATUS,
+        l.INTEREST_RATE,
+        l.CURRENCY_OF_COMMITMENT,
+        l.RECORD_HASH,
+
+        d.LOAN_SK,
+        d.RECORD_HASH AS OLD_HASH,
+        d.EFFECTIVE_START_DATE
+    FROM latest l
+    LEFT JOIN {{ this }} d
+        ON l.LOAN_NUMBER = d.LOAN_NUMBER
+       AND d.IS_CURRENT = TRUE
+)
+
+-- ============================================================
+-- 3. CLOSE OUT OLD RECORDS (WHEN RECORD_HASH CHANGES)
+-- ============================================================
+, close_out AS (
+    SELECT
+        LOAN_SK,
+        LOAN_NUMBER,
+        LOAN_TYPE,
+        LOAN_STATUS,
+        INTEREST_RATE,
+        CURRENCY_OF_COMMITMENT,
+        EFFECTIVE_START_DATE,
+        CURRENT_DATE() AS EFFECTIVE_END_DATE,
+        FALSE AS IS_CURRENT,
+        OLD_HASH AS RECORD_HASH
+    FROM compare
+    WHERE OLD_HASH IS NOT NULL
+      AND OLD_HASH != RECORD_HASH
+)
+
+-- ============================================================
+-- 4. INSERT NEW CURRENT VERSION
+-- ============================================================
+, new_versions AS (
+    SELECT
+        {{ generate_surrogate_key(["LOAN_NUMBER", "CURRENT_TIMESTAMP"]) }} AS LOAN_SK,
+        LOAN_NUMBER,
+        LOAN_TYPE,
+        LOAN_STATUS,
+        INTEREST_RATE,
+        CURRENCY_OF_COMMITMENT,
+        CURRENT_DATE() AS EFFECTIVE_START_DATE,
+        NULL AS EFFECTIVE_END_DATE,
+        TRUE AS IS_CURRENT,
+        RECORD_HASH
+    FROM compare
+    WHERE OLD_HASH IS NULL
+       OR OLD_HASH != RECORD_HASH
+)
+
+-- ============================================================
+-- 5. FINAL UNION
+-- ============================================================
+SELECT * FROM close_out
+UNION ALL
+SELECT * FROM new_versions
+
+{% endif %}

@@ -1,0 +1,20 @@
+{{ config(
+    materialized='table',
+    schema='GOLD'
+) }}
+
+WITH src AS (
+    SELECT DISTINCT
+        GUARANTOR_COUNTRY_ECONOMY_CODE AS country_code,
+        GUARANTOR AS country_name
+    FROM {{ ref('silver_master') }}
+    WHERE GUARANTOR_COUNTRY_ECONOMY_CODE IS NOT NULL
+)
+
+SELECT
+    {{ generate_surrogate_key(['country_code']) }} AS guarantor_country_key,
+    country_code,
+    country_name,
+    'GUARANTOR' AS country_role,
+    'NA' AS region
+FROM src

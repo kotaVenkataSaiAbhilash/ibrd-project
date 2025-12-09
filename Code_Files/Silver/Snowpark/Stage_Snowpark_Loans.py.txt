@@ -1,0 +1,126 @@
+def model(dbt, session):
+
+    dbt.config(
+    materialized="incremental",
+    schema="SILVER",
+    database="IBRD_PROJECT",
+    unique_key="LOAN_NUMBER",   
+    incremental_strategy="append"
+)
+
+
+    from snowflake.snowpark.functions import (
+        col, coalesce, lit, row_number
+    )
+    from snowflake.snowpark.window import Window
+    from snowflake.snowpark.functions import lag as sp_lag, lead as sp_lead
+    from functools import reduce
+    from operator import and_
+
+    # Load Bronze
+    df = session.table("IBRD_PROJECT.IBRD.IBRD_LOANS_RAW_STREAM")
+
+    # Window for forward/backward fill
+    w = Window.orderBy(col("LOAN_NUMBER"))
+
+    def ffill_bfill(c):
+        return coalesce(
+            col(c),
+            sp_lag(col(c)).over(w),
+            sp_lead(col(c)).over(w)
+        )
+
+    # Step A — Base transformations
+    df2 = (
+        df
+        .withColumn("COUNTRY_ECONOMY_CODE", ffill_bfill("COUNTRY_ECONOMY_CODE"))
+        .withColumn("BORROWER", ffill_bfill("BORROWER"))
+        .withColumn("GUARANTOR_COUNTRY_ECONOMY_CODE", ffill_bfill("GUARANTOR_COUNTRY_ECONOMY_CODE"))
+        .withColumn("GUARANTOR", ffill_bfill("GUARANTOR"))
+        .withColumn("INTEREST_RATE", ffill_bfill("INTEREST_RATE"))
+
+        # Force-fill currency
+        .withColumn("CURRENCY_OF_COMMITMENT", lit("US"))
+
+        .withColumn("PROJECT_ID", ffill_bfill("PROJECT_ID"))
+        .withColumn("PROJECT_NAME", coalesce(col("PROJECT_NAME"), lit("Unassigned project")))
+        .withColumn(
+            "LAST_DISBURSEMENT_DATE",
+            coalesce(col("LAST_DISBURSEMENT_DATE"), col("AGREEMENT_SIGNING_DATE"))
+        )
+    )
+
+    # Step B — Remove rows with NULL mandatory fields
+    mandatory_cols = [
+        "LOAN_NUMBER",
+        "COUNTRY_ECONOMY_CODE",
+        "BORROWER",
+        "PROJECT_ID",
+        "LOAN_STATUS",
+        "INTEREST_RATE",
+        "FIRST_REPAYMENT_DATE",
+        "LAST_REPAYMENT_DATE",
+        "AGREEMENT_SIGNING_DATE"
+    ]
+
+    mandatory_condition = reduce(
+        lambda a, b: a & b,
+        [col(c).isNotNull() for c in mandatory_cols]
+    )
+
+    df3 = df2.filter(mandatory_condition)
+
+    # Step C — Default fill optional columns
+    optional_cols = [c for c in df3.columns if c not in mandatory_cols]
+
+    date_defaults = [
+        "END_OF_PERIOD", "EFFECTIVE_DATE", "CLOSED_DATE",
+        "LAST_DISBURSEMENT_DATE", "BOARD_APPROVAL_DATE"
+    ]
+
+    numeric_defaults = [
+        "ORIGINAL_PRINCIPAL_AMOUNT_USD",
+        "CANCELLED_AMOUNT_USD",
+        "UNDISBURSED_AMOUNT_USD",
+        "DISBURSED_AMOUNT_USD",
+        "REPAID_TO_IBRD_USD",
+        "DUE_TO_IBRD_USD",
+        "EXCHANGE_ADJUSTMENT_USD",
+        "BORROWERS_OBLIGATION_USD",
+        "SOLD_3RD_PARTY_USD",
+        "REPAID_3RD_PARTY_USD",
+        "DUE_3RD_PARTY_USD",
+        "LOANS_HELD_USD"
+    ]
+
+    df4 = df3
+
+    for c in optional_cols:
+        if c in date_defaults:
+            df4 = df4.withColumn(c, coalesce(col(c), lit("1900-01-01")))
+
+    for c in numeric_defaults:
+        df4 = df4.withColumn(c, coalesce(col(c), lit(0)))
+
+    string_optional = [
+        c for c in optional_cols
+        if c not in date_defaults and c not in numeric_defaults
+    ]
+
+    for c in string_optional:
+        df4 = df4.withColumn(c, coalesce(col(c), lit("NA")))
+
+    # Step D — REMOVE DUPLICATES (NEW LOGIC)
+    dup_window = Window.partitionBy(
+        col("LOAN_NUMBER"),
+        col("END_OF_PERIOD")
+    ).orderBy(col("LOAN_NUMBER"))
+
+    df5 = (
+        df4
+        .withColumn("rn", row_number().over(dup_window))
+        .filter(col("rn") == 1)
+        .drop("rn")
+    )
+
+    return df5
